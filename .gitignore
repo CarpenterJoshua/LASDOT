@@ -1,0 +1,10 @@
+# Point cloud data — large binaries, keep them out of git history
+data/
+*.las
+*.laz
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/

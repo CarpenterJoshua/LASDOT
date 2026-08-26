@@ -1,0 +1,4 @@
+{
+  "python.defaultInterpreterPath": "/home/nurveyor/miniconda3/envs/LASDOT/bin/python",
+  "jupyter.notebookFileRoot": "${workspaceFolder}"
+}
