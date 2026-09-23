@@ -37,8 +37,6 @@ chunk) than on plain `.las`.
 step of that call, split out so each step can be read and tested on its own.
 """
 
-from __future__ import annotations
-
 from copy import deepcopy
 
 import laspy

@@ -35,8 +35,6 @@ say -- read it in chunks and hand this module one chunk at a time, which is
 what keeps a billion-point job on an ordinary workstation.
 """
 
-from __future__ import annotations
-
 import io
 
 import numpy as np
@@ -98,14 +96,14 @@ class PreparedCenterline:
 
     def __init__(
         self,
-        seg_start: np.ndarray,       # (S, 2) each segment's start vertex
-        direction: np.ndarray,       # (S, 2) unit vector along each segment
-        length: np.ndarray,          # (S,)   each segment's length
-        station0: np.ndarray,        # (S,)   station at each segment's start
-        sample_segment: np.ndarray,  # (P,)   which segment owns each tree sample
-        tree: cKDTree,               #        the samples themselves
-        total_length: float,
-        start_station: float,
+        seg_start,       # (S, 2) each segment's start vertex
+        direction,       # (S, 2) unit vector along each segment
+        length,          # (S,)   each segment's length
+        station0,        # (S,)   station at each segment's start
+        sample_segment,  # (P,)   which segment owns each tree sample
+        tree,            #        the samples themselves
+        total_length,    #        summed length of every segment
+        start_station,   #        station value at the first vertex
     ):
         self.seg_start = seg_start
         self.direction = direction
@@ -172,9 +170,23 @@ def prepare_centerline(vertices, sample_spacing=1.0, start_station=0.0):
     # before it.
     station0 = start_station + np.concatenate([[0.0], np.cumsum(length)[:-1]])
 
-    # Densify. Each segment contributes evenly spaced samples INCLUDING both
-    # endpoints, so even a segment shorter than sample_spacing is represented
-    # and corners always have a sample sitting exactly on them.
+    # THE SPRINKLE. This loop is where the broadphase index is built, and it
+    # exists to work around one fact: a KD-tree can only index POINTS, but what
+    # we actually need to search is SEGMENTS. So we scatter points along every
+    # segment and remember which segment each one came from -- `samples` holds
+    # the scattered points, `owners` the lookup back to their segment. Together
+    # they turn "which segment is nearest?" into "which sample is nearest?",
+    # which is a question a tree can answer.
+    #
+    # Nothing about station or offset is decided here. This only ever produces
+    # a good SHORTLIST of segments to test properly later; see xyz2sta.
+    #
+    # Each segment contributes evenly spaced samples INCLUDING both endpoints,
+    # so even a segment shorter than sample_spacing is represented and corners
+    # always have a sample sitting exactly on them. That last part matters:
+    # the clamp in _project_onto_segments folds both segments meeting at a
+    # corner onto that shared vertex, so both must reach the shortlist for the
+    # tie-break to choose between them.
     samples, owners = [], []
     for i, seg_length in enumerate(length):
         count = max(int(np.ceil(seg_length / sample_spacing)), 1)
@@ -253,6 +265,19 @@ def xyz2sta(points_xyz, centerline, k=8, start_station=0.0):
         return np.column_stack([station, offset, z])
     query_xy = xy[finite]
 
+    # THE BROADPHASE. Here is the KD-tree's entire job, and it is only ever to
+    # produce a SHORTLIST. The tree holds the sprinkled samples built by
+    # prepare_centerline, so what comes back is the k nearest SAMPLES;
+    # sample_segment then translates those into the k candidate SEGMENTS.
+    #
+    # No station or offset exists yet. The tree's own distances are distances
+    # to sample points rather than to segments, so they are approximate and get
+    # dropped on the floor (`_`) the moment they have done their job of ranking.
+    #
+    # Why k=8 and not 1: nearest-sample and nearest-segment are not always the
+    # same segment, most often at bends where segments crowd together. The tree
+    # only has to land the right segment somewhere in its top k -- the exact
+    # math below does the actual choosing.
     k_eff = min(k, prepared.tree.n)
     _, sample_idx = prepared.tree.query(query_xy, k=k_eff)
     candidates = prepared.sample_segment[
@@ -265,6 +290,12 @@ def xyz2sta(points_xyz, centerline, k=8, start_station=0.0):
     best_offset = np.zeros(len(query_xy))
     best_segment = np.full(len(query_xy), np.iinfo(np.int32).max, dtype=np.int32)
 
+    # THE NARROWPHASE. The true station and offset are computed HERE, and
+    # nowhere else in this function. Each candidate segment gets the exact
+    # projection math from layer 1, and the genuinely closest one wins. The
+    # tree's ranking carries no authority at this point: a segment that came
+    # back 8th can win outright, it is just that the 1st usually does.
+    #
     # A small fixed loop over the k candidate slots, keeping a running best.
     # `candidates` is unavoidably (Nq, k), but doing the *math* one slot at a
     # time keeps every intermediate (Nq,). Vectorising across k as well would
@@ -278,6 +309,10 @@ def xyz2sta(points_xyz, centerline, k=8, start_station=0.0):
             prepared.direction[segment],
             prepared.length[segment],
         )
+        # The real station for this candidate: the station already accumulated
+        # at the segment's start, plus how far along that segment the point
+        # landed. `offset_j` and `distance_j` come straight out of the same
+        # call. These three lines are the payload the whole file exists for.
         station_j = prepared.station0[segment] + t
 
         # Closer wins; on an exact tie the lower segment index wins.

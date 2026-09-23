@@ -28,8 +28,6 @@ stations near the one asked for, and only those rows are read -- one seek, one
 contiguous read.
 """
 
-from __future__ import annotations
-
 import os
 from copy import deepcopy
 
